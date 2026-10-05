@@ -6,6 +6,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 
 import pandas as pd
 
@@ -22,7 +23,7 @@ class ColumnMap:
 
 @dataclass
 class Dataset:
-    path: Path
+    path: Path | BinaryIO  # 파일 경로 또는 업로드된 파일 객체
     columns: ColumnMap
     currency: str  # 금액 단위 (보고서에 표시)
     encoding: str = "utf-8"

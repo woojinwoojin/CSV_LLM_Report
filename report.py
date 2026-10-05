@@ -2,6 +2,7 @@
 
 import json
 import os
+import sys
 
 import anthropic
 import pandas as pd
@@ -37,41 +38,36 @@ SYSTEM_PROMPT = """당신은 이커머스 회사의 시니어 데이터 분석�
 5. 제안 액션 (우선순위 순, 3개 이내)"""
 
 
-def build_kpi_payload() -> dict:
-    """LLM에 넘길 KPI를 JSON으로 바꿀 수 있는 형태로 모은다. 원본 행은 넘기지 않는다."""
-    df = load_data(SUPERSTORE)
+RATIO_COLUMNS = {"sales_mom", "sales_yoy", "profit_margin"}
+
+
+def to_json_row(row: pd.Series) -> dict:
+    """금액은 정수로, 비율(0.123)은 퍼센트(12.3)로 바꾼다. 비교 대상이 없는 NaN은 null로 넘긴다."""
+    result = {}
+    for key, value in row.items():
+        if pd.isna(value):
+            result[f"{key}_pct" if key in RATIO_COLUMNS else key] = None
+        elif key in RATIO_COLUMNS:
+            result[f"{key}_pct"] = round(float(value) * 100, 1)
+        else:
+            result[key] = round(float(value))
+    return result
+
+
+def build_kpi_payload(df: pd.DataFrame, currency: str) -> dict:
+    """LLM에 넘길 KPI를 JSON으로 바꿀 수 있는 형태로 모은다. 원본 행은 넘기지 않는다.
+
+    df는 load_data()로 읽어 컬럼이 역할 이름(date, sales, ...)으로 바뀐 상태여야 한다.
+    """
     monthly = monthly_kpis(df).tail(RECENT_MONTHS)
-
-    monthly_rows = []
-    for month, row in monthly.iterrows():
-        monthly_rows.append(
-            {
-                "month": str(month),
-                "sales": round(row["sales"]),
-                "profit": round(row["profit"]),
-                "orders": int(row["orders"]),
-                "customers": int(row["customers"]),
-                # 비교 대상이 없으면 NaN이므로 null로 넘긴다.
-                "sales_mom_pct": None if pd.isna(row["sales_mom"]) else round(row["sales_mom"] * 100, 1),
-                "sales_yoy_pct": None if pd.isna(row["sales_yoy"]) else round(row["sales_yoy"] * 100, 1),
-            }
-        )
-
-    categories = {
-        name: {
-            "sales": round(row["sales"]),
-            "profit": round(row["profit"]),
-            "profit_margin_pct": round(row["profit_margin"] * 100, 1),
-        }
-        for name, row in category_kpis(df).iterrows()
-    }
-
     return {
-        "currency": SUPERSTORE.currency,
+        "currency": currency,
         "period": f"{df['date'].min().date()} ~ {df['date'].max().date()}",
         "summary": {k: round(float(v)) for k, v in summarize(df).items()},
-        "by_category": categories,
-        f"monthly_last_{RECENT_MONTHS}": monthly_rows,
+        "by_category": {name: to_json_row(row) for name, row in category_kpis(df).iterrows()},
+        f"monthly_last_{RECENT_MONTHS}": [
+            {"month": str(month), **to_json_row(row)} for month, row in monthly.iterrows()
+        ],
     }
 
 
@@ -79,6 +75,11 @@ def build_user_message(payload: dict) -> str:
     return "다음 KPI 데이터로 분석 보고서를 작성해 주세요.\n\n" + json.dumps(
         payload, ensure_ascii=False, indent=2
     )
+
+
+def log_usage(model: str, input_tokens: int, output_tokens: int) -> None:
+    # 보고서 본문(stdout)과 섞이지 않도록 stderr로 출력한다.
+    print(f"[usage] {model} input={input_tokens} output={output_tokens}", file=sys.stderr)
 
 
 def generate_with_openai(payload: dict, model: str) -> str:
@@ -89,8 +90,7 @@ def generate_with_openai(payload: dict, model: str) -> str:
         input=build_user_message(payload),
         reasoning={"effort": "low"},  # 추론 토큰을 줄여 비용 절약
     )
-    usage = response.usage
-    print(f"[usage] {model} input={usage.input_tokens} output={usage.output_tokens}\n")
+    log_usage(model, response.usage.input_tokens, response.usage.output_tokens)
     return response.output_text
 
 
@@ -104,23 +104,27 @@ def generate_with_anthropic(payload: dict, model: str) -> str:
     )
     if response.stop_reason == "refusal":
         raise RuntimeError(f"모델이 요청을 거절했습니다: {response.stop_details}")
-    usage = response.usage
-    print(f"[usage] {model} input={usage.input_tokens} output={usage.output_tokens}\n")
+    log_usage(model, response.usage.input_tokens, response.usage.output_tokens)
     return "".join(block.text for block in response.content if block.type == "text")
 
 
-def generate_report(payload: dict) -> str:
+def current_model() -> tuple[str, str]:
     provider = os.getenv("LLM_PROVIDER", "openai")
+    if provider not in DEFAULT_MODELS:
+        raise ValueError(f"지원하지 않는 LLM_PROVIDER: {provider}")
+    return provider, os.getenv(f"{provider.upper()}_MODEL", DEFAULT_MODELS[provider])
+
+
+def generate_report(payload: dict) -> str:
+    provider, model = current_model()
     if provider == "openai":
-        return generate_with_openai(payload, os.getenv("OPENAI_MODEL", DEFAULT_MODELS["openai"]))
-    if provider == "anthropic":
-        return generate_with_anthropic(payload, os.getenv("ANTHROPIC_MODEL", DEFAULT_MODELS["anthropic"]))
-    raise ValueError(f"지원하지 않는 LLM_PROVIDER: {provider}")
+        return generate_with_openai(payload, model)
+    return generate_with_anthropic(payload, model)
 
 
 def main() -> None:
     load_dotenv()
-    payload = build_kpi_payload()
+    payload = build_kpi_payload(load_data(SUPERSTORE), SUPERSTORE.currency)
     print(generate_report(payload))
 
 

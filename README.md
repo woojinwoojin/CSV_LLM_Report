@@ -38,6 +38,10 @@ copy .env.example .env   # 그다음 .env에 API 키 입력
 # 3. 실행
 .\.venv\Scripts\python analysis.py   # KPI만 계산 (API 호출 없음)
 .\.venv\Scripts\python report.py     # LLM 보고서 생성 (기본: OpenAI gpt-5.4-mini)
+.\.venv\Scripts\streamlit run app.py # 로컬 UI (http://localhost:8501)
+
+# 4. 테스트 (API 호출 없음)
+.\.venv\Scripts\python -m pytest
 ```
 
 ## 이번 주에 하지 않는 것
